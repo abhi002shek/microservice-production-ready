@@ -1,0 +1,104 @@
+# ── EC2NodeClass ───────────────────────────────────────────────────────────────
+# Defines the EC2-level config for nodes Karpenter launches
+# Replace KARPENTER_NODE_ROLE with the output: karpenter_node_instance_profile_name
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  # Use the latest EKS-optimized Amazon Linux 2023 AMI automatically
+  amiFamily: AL2023
+
+  # IAM instance profile for nodes (from terraform output)
+  instanceProfile: online-boutique-prod-karpenter-node-profile
+
+  # Nodes go into private subnets — discovered by the cluster tag
+  subnetSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/online-boutique-prod: shared
+
+  # Security groups — discovered by the cluster tag
+  securityGroupSelectorTerms:
+    - tags:
+        kubernetes.io/cluster/online-boutique-prod: owned
+
+  # 50GB encrypted gp3 root volume — matches our security baseline
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 50Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+
+  # IMDSv2 enforced on all Karpenter-launched nodes
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+
+  tags:
+    Environment: prod
+    ManagedBy: karpenter
+    Project: online-boutique
+---
+# ── NodePool ───────────────────────────────────────────────────────────────────
+# Defines WHAT nodes Karpenter can launch and the scheduling constraints
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    metadata:
+      labels:
+        node-type: workload
+    spec:
+      nodeClassRef:
+        apiVersion: karpenter.k8s.aws/v1beta1
+        kind: EC2NodeClass
+        name: default
+
+      # Karpenter will only schedule pods that tolerate this taint
+      # (or have no taint preference — workload pods have no taints)
+      taints: []
+
+      requirements:
+        # Allow both On-Demand and Spot — Karpenter picks cheapest that fits
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand", "spot"]
+
+        # Allow a wide range of instance families for best bin-packing
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["t3", "t3a", "m5", "m5a", "m6i", "m6a", "c5", "c6i"]
+
+        # Minimum 2 vCPUs — don't launch t3.micro/nano
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: Gt
+          values: ["1"]
+
+        # Only amd64 architecture
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # Only Linux
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+  # Scale down nodes that have been empty for 30 seconds
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 30s
+    # Never evict pods during business hours — adjust to your timezone
+    budgets:
+      - nodes: "10%"
+
+  # Hard cap: never have more than 20 Karpenter-managed nodes
+  limits:
+    cpu: "80"       # ~20 x t3.medium (4 vCPU each)
+    memory: 160Gi   # ~20 x t3.medium (8Gi each)

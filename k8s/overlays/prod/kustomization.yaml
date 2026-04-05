@@ -1,0 +1,57 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: webapps
+
+bases:
+  - ../../base
+
+# Production-specific image tags are managed by ArgoCD Image Updater
+# or updated by Jenkins pipeline via kustomize edit set image
+images:
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/adservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/cartservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/checkoutservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/currencyservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/emailservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/frontend
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/loadgenerator
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/paymentservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/productcatalogservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/recommendationservice
+    newTag: latest
+  - name: ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/online-boutique/shippingservice
+    newTag: latest
+
+patches:
+  # Production: 3 replicas for critical services
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: frontend
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: checkoutservice
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: cartservice

@@ -1,0 +1,45 @@
+# ArgoCD AppProject - restricts what ArgoCD can deploy and where
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: boutique-prod
+  namespace: argocd
+spec:
+  description: Online Boutique production project
+
+  sourceRepos:
+    - https://github.com/abhi002shek/microservice-production-ready.git
+
+  destinations:
+    - namespace: webapps
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "apps"
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: "networking.k8s.io"
+      kind: Ingress
+    - group: "networking.k8s.io"
+      kind: NetworkPolicy
+    - group: "autoscaling"
+      kind: HorizontalPodAutoscaler
+    - group: "policy"
+      kind: PodDisruptionBudget
+
+  roles:
+    - name: ci-deployer
+      description: Jenkins CI can sync apps
+      policies:
+        - p, proj:boutique-prod:ci-deployer, applications, sync, boutique-prod/*, allow
+        - p, proj:boutique-prod:ci-deployer, applications, get, boutique-prod/*, allow
+      jwtTokens: []

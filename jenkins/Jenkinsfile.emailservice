@@ -1,0 +1,104 @@
+// emailservice branch Jenkinsfile
+def SERVICE_NAME = 'emailservice'
+def BUILD_CONTEXT = '.'
+
+pipeline {
+    agent any
+    environment {
+        SERVICE_NAME      = "${SERVICE_NAME}"
+        BUILD_CONTEXT     = "${BUILD_CONTEXT}"
+        AWS_REGION        = 'ap-south-1'
+        AWS_ACCOUNT_ID    = credentials('aws-account-id')
+        ECR_REGISTRY      = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REPO          = "online-boutique/${SERVICE_NAME}"
+        IMAGE_TAG         = "${BUILD_NUMBER}-${GIT_COMMIT[0..7]}"
+        FULL_IMAGE        = "${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+        SONAR_PROJECT_KEY = "online-boutique-${SERVICE_NAME}"
+        GIT_OPS_REPO      = "https://github.com/abhi002shek/microservice-production-ready.git"
+        ARGOCD_SERVER     = credentials('argocd-server-url')
+    }
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('SAST - Trivy FS Scan') {
+            steps {
+                sh "trivy fs --exit-code 1 --severity HIGH,CRITICAL --format table --output trivy-fs-report.txt ${BUILD_CONTEXT}"
+            }
+            post { always { archiveArtifacts artifacts: 'trivy-fs-report.txt', allowEmptyArchive: true } }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    sh "sonar-scanner -Dsonar.projectKey=${SONAR_PROJECT_KEY} -Dsonar.sources=${BUILD_CONTEXT} -Dsonar.qualitygate.wait=true"
+                }
+            }
+        }
+        stage('Quality Gate') {
+            steps { timeout(time: 5, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
+        }
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${FULL_IMAGE} -t ${ECR_REGISTRY}/${ECR_REPO}:latest ${BUILD_CONTEXT}"
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --format table --output trivy-image-report.txt ${FULL_IMAGE}"
+            }
+            post { always { archiveArtifacts artifacts: 'trivy-image-report.txt', allowEmptyArchive: true } }
+        }
+        stage('Push to ECR') {
+            steps {
+                withAWS(credentials: 'aws-credentials', region: "${AWS_REGION}") {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        docker push ${FULL_IMAGE}
+                        docker push ${ECR_REGISTRY}/${ECR_REPO}:latest
+                    """
+                }
+            }
+        }
+        stage('Update GitOps Manifest') {
+            steps {
+                withCredentials([gitUsernamePassword(credentialsId: 'github-token', gitToolName: 'Default')]) {
+                    sh """
+                        git clone ${GIT_OPS_REPO} gitops-repo
+                        cd gitops-repo
+                        git config user.email "jenkins@ci.local"
+                        git config user.name "Jenkins CI"
+                        cd k8s/overlays/prod
+                        kustomize edit set image ${ECR_REGISTRY}/online-boutique/${SERVICE_NAME}=${FULL_IMAGE}
+                        git add kustomization.yaml
+                        git commit -m "ci: update ${SERVICE_NAME} to ${IMAGE_TAG} [skip ci]"
+                        git push origin main
+                    """
+                }
+            }
+        }
+        stage('ArgoCD Sync') {
+            steps {
+                withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                    sh """
+                        argocd app sync online-boutique --auth-token ${ARGOCD_TOKEN} --server ${ARGOCD_SERVER} --grpc-web --timeout 120
+                        argocd app wait online-boutique --auth-token ${ARGOCD_TOKEN} --server ${ARGOCD_SERVER} --grpc-web --timeout 180
+                    """
+                }
+            }
+        }
+    }
+    post {
+        always {
+            sh "docker rmi ${FULL_IMAGE} || true"
+            sh "rm -rf gitops-repo || true"
+            cleanWs()
+        }
+    }
+}
