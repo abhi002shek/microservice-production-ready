@@ -80,7 +80,7 @@ aws configure
 
 # Verify
 aws sts get-caller-identity
-# Should show Account: 616919332376
+# Should show Account: xxxxxx
 ```
 
 ---
