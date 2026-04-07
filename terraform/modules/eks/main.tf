@@ -5,10 +5,7 @@ variable "private_subnet_ids" { type = list(string) }
 variable "project_name" { type = string }
 variable "environment" { type = string }
 
-locals {
-  account_id = "616919332376"
-  aws_region = "ap-south-1"
-}
+
 
 # ── IAM: Cluster Role ──────────────────────────────────────────────────────────
 resource "aws_iam_role" "cluster" {

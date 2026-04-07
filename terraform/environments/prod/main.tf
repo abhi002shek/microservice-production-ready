@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.10.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -10,12 +10,14 @@ terraform {
       version = "~> 4.0"
     }
   }
+
+  # Native S3 state locking — no DynamoDB required (Terraform >= 1.10)
   backend "s3" {
-    bucket         = "boutique-tfstate-prod"
-    key            = "prod/terraform.tfstate"
-    region         = "ap-south-1"
-    encrypt        = true
-    dynamodb_table = "boutique-tfstate-lock"
+    bucket       = "boutique-tfstate-prod"
+    key          = "prod/terraform.tfstate"
+    region       = "ap-south-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 

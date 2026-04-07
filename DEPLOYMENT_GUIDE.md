@@ -63,7 +63,7 @@ brew install --cask docker
 
 Minimum versions:
 ```
-terraform >= 1.6.0
+terraform >= 1.10.0
 aws CLI  >= 2.x
 kubectl  >= 1.29
 helm     >= 3.x
@@ -88,7 +88,7 @@ aws sts get-caller-identity
 ## Step 1 — Bootstrap Terraform Remote State
 
 Run this **once only** before any `terraform` commands. It creates the S3 bucket
-and DynamoDB table used to store and lock Terraform state remotely.
+used to store Terraform state remotely.
 
 ```bash
 cd terraform/
@@ -98,7 +98,10 @@ chmod +x bootstrap.sh
 
 What it creates:
 - S3 bucket `boutique-tfstate-prod` — versioned, KMS-encrypted, public access blocked
-- DynamoDB table `boutique-tfstate-lock` — prevents concurrent `terraform apply` runs
+
+State locking uses **native S3 locking** (`use_lockfile = true`, Terraform >= 1.10).
+No DynamoDB table needed. Terraform writes a `.tflock` file directly in S3 to prevent
+concurrent `terraform apply` runs — simpler and free.
 
 ---
 
@@ -264,13 +267,13 @@ What it does:
 - Applies `Application` — tells ArgoCD to watch `k8s/overlays/prod/` on the `main` branch
 - Prints the initial admin password
 
-Access ArgoCD UI:
+Access ArgoCD UI (ArgoCD stays ClusterIP — not exposed publicly):
 ```bash
-# Get the LoadBalancer URL
-kubectl get svc argocd-server -n argocd
+# Port-forward to localhost
+kubectl port-forward svc/argocd-server -n argocd 8080:443 &
 
-# Login
-argocd login <ARGOCD_LB_URL> --username admin --password <INITIAL_PASSWORD>
+# Open https://localhost:8080 in browser, or login via CLI
+argocd login localhost:8080 --username admin --password <INITIAL_PASSWORD> --insecure
 
 # Change password immediately
 argocd account update-password

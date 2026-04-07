@@ -1,23 +1,26 @@
-# Terraform S3 backend bootstrap
-# Run this ONCE before terraform init
-# This creates the S3 bucket and DynamoDB table for remote state
+#!/usr/bin/env bash
+# terraform/bootstrap.sh
+# Run ONCE before `terraform init` to create the S3 backend bucket.
+# Requires: aws CLI configured with account 616919332376
+set -euo pipefail
 
 AWS_REGION="ap-south-1"
 BUCKET_NAME="boutique-tfstate-prod"
-DYNAMO_TABLE="boutique-tfstate-lock"
 
-echo "Creating S3 bucket for Terraform state..."
+echo "1. Creating S3 bucket for Terraform state..."
 aws s3api create-bucket \
-  --bucket ${BUCKET_NAME} \
-  --region ${AWS_REGION} \
-  --create-bucket-configuration LocationConstraint=${AWS_REGION}
+  --bucket "${BUCKET_NAME}" \
+  --region "${AWS_REGION}" \
+  --create-bucket-configuration LocationConstraint="${AWS_REGION}"
 
+echo "2. Enabling versioning (allows state history + recovery)..."
 aws s3api put-bucket-versioning \
-  --bucket ${BUCKET_NAME} \
+  --bucket "${BUCKET_NAME}" \
   --versioning-configuration Status=Enabled
 
+echo "3. Enabling KMS encryption at rest..."
 aws s3api put-bucket-encryption \
-  --bucket ${BUCKET_NAME} \
+  --bucket "${BUCKET_NAME}" \
   --server-side-encryption-configuration '{
     "Rules": [{
       "ApplyServerSideEncryptionByDefault": {
@@ -26,17 +29,12 @@ aws s3api put-bucket-encryption \
     }]
   }'
 
+echo "4. Blocking all public access..."
 aws s3api put-public-access-block \
-  --bucket ${BUCKET_NAME} \
+  --bucket "${BUCKET_NAME}" \
   --public-access-block-configuration \
     "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
 
-echo "Creating DynamoDB table for state locking..."
-aws dynamodb create-table \
-  --table-name ${DYNAMO_TABLE} \
-  --attribute-definitions AttributeName=LockID,AttributeType=S \
-  --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region ${AWS_REGION}
-
-echo "✅ Backend bootstrap complete"
+echo "✅ Bootstrap complete."
+echo "   State locking uses native S3 locking (Terraform >= 1.10, no DynamoDB needed)."
+echo "   Now run: cd terraform/environments/prod && terraform init"
