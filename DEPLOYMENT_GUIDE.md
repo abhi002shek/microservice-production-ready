@@ -45,7 +45,7 @@ Jenkins CI Pipeline (one job per service branch)
      http://<ALB-DNS>   ← your app URL (no domain needed yet)
 ```
 
-**AWS Account:** 616919332376  
+**AWS Account:**
 **Region:** ap-south-1  
 **GitHub Repo:** https://github.com/abhi002shek/microservice-production-ready
 
