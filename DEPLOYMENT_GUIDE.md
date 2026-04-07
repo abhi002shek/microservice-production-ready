@@ -9,7 +9,7 @@
 Developer Push (per-service branch)
      │
      ▼
-GitHub → https://github.com/abhi002shek/microservice-production-ready
+   GitHub
      │
      ▼
 Jenkins CI Pipeline (one job per service branch)
