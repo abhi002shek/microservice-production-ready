@@ -288,7 +288,10 @@ spec:
       ports:
         - port: 50051
 ---
-# emailservice
+# emailservice — listens on container port 8080, Service exposes port 5000
+# NetworkPolicy must allow the port that OTHER pods connect to (5000, the Service port)
+# because NetworkPolicy operates at the pod level using the container port
+# checkoutservice connects to emailservice:5000 → pod port 8080
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

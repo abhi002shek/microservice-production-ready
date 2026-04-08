@@ -3,7 +3,7 @@ kind: Kustomization
 
 namespace: webapps
 
-bases:
+resources:
   - ../../base
 
 # Production-specific image tags are managed by ArgoCD Image Updater

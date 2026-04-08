@@ -127,6 +127,8 @@ pipeline {
 
                         git add kustomization.yaml
                         git commit -m "ci: update ${SERVICE_NAME} to ${IMAGE_TAG} [skip ci]"
+                        # Rebase before push to handle concurrent branch pipelines
+                        git pull --rebase origin main
                         git push origin main
                     """
                 }
@@ -137,6 +139,7 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
                     sh """
+                        # Trigger sync — ArgoCD auto-sync will also pick up the git push above
                         argocd app sync online-boutique \
                             --auth-token ${ARGOCD_TOKEN} \
                             --server ${ARGOCD_SERVER} \

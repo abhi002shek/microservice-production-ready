@@ -6,6 +6,7 @@ namespace: webapps
 resources:
   - namespace.yaml
   - serviceaccount.yaml
+  - storageclass.yaml
   - deployments.yaml
   - ingress.yaml
   - hpa.yaml

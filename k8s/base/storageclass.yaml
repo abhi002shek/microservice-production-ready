@@ -1,0 +1,15 @@
+# gp3 StorageClass — required by Prometheus and Alertmanager PVCs.
+# The EBS CSI driver addon is installed by Terraform but only creates gp2 by default.
+# This creates a gp3 StorageClass which is cheaper and faster than gp2.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+parameters:
+  type: gp3
+  encrypted: "true"

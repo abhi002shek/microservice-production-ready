@@ -5,7 +5,16 @@
 
 grafana:
   enabled: true
-  adminPassword: "CHANGE_ME_USE_SECRET"
+  # Do NOT set adminPassword here in plaintext.
+  # Create the secret before installing:
+  #   kubectl create secret generic grafana-admin-secret \
+  #     --from-literal=admin-user=admin \
+  #     --from-literal=admin-password='<your-strong-password>' \
+  #     -n monitoring
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
   ingress:
     enabled: true
     annotations:

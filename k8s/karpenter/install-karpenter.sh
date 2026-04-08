@@ -39,9 +39,9 @@ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
   --set controller.resources.requests.memory=256Mi \
   --set controller.resources.limits.cpu=1 \
   --set controller.resources.limits.memory=1Gi \
-  --set tolerations[0].key=CriticalAddonsOnly \
-  --set tolerations[0].operator=Exists \
-  --set tolerations[0].effect=NoSchedule \
+  --set "affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=node-type" \
+  --set "affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In" \
+  --set "affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=system" \
   --wait
 
 echo "5. Waiting for Karpenter to be ready..."

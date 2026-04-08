@@ -17,7 +17,7 @@ spec:
     - tags:
         kubernetes.io/cluster/online-boutique-prod: shared
 
-  # Security groups — discovered by the cluster tag
+  # Security groups — discovered by the cluster tag (set to "owned" in terraform)
   securityGroupSelectorTerms:
     - tags:
         kubernetes.io/cluster/online-boutique-prod: owned
@@ -90,11 +90,12 @@ spec:
           operator: In
           values: ["linux"]
 
-  # Scale down nodes that have been empty for 30 seconds
+  # Scale down nodes that have been empty — WhenUnderutilized is safer for prod
+  # WhenEmpty only consolidates fully empty nodes; avoids evicting running pods
   disruption:
-    consolidationPolicy: WhenEmpty
-    consolidateAfter: 30s
-    # Never evict pods during business hours — adjust to your timezone
+    consolidationPolicy: WhenUnderutilized
+    consolidateAfter: 300s
+    # Never evict more than 10% of nodes at once
     budgets:
       - nodes: "10%"
 

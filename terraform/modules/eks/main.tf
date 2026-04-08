@@ -51,7 +51,11 @@ resource "aws_security_group" "cluster" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.cluster_name}-cluster-sg" }
+  tags = {
+    Name                                        = "${var.cluster_name}-cluster-sg"
+    # Required so Karpenter's securityGroupSelectorTerms can discover this SG
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+  }
 }
 
 # ── EKS Cluster ────────────────────────────────────────────────────────────────
@@ -303,11 +307,11 @@ resource "aws_eks_node_group" "system" {
     "node-type"               = "system"
   }
 
-  taint {
-    key    = "CriticalAddonsOnly"
-    value  = "true"
-    effect = "NO_SCHEDULE"
-  }
+  # IMPORTANT: Do NOT put a taint here.
+  # A NoSchedule taint on system nodes blocks ALL workload pods from scheduling
+  # until Karpenter is running and has launched workload nodes.
+  # Karpenter and CoreDNS use nodeAffinity/nodeSelector to stay on system nodes,
+  # not taints. Taints here cause pods to stay Pending on fresh cluster bootstrap.
 
   launch_template {
     id      = aws_launch_template.system_node.id
