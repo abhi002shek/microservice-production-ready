@@ -6,7 +6,7 @@ set -euo pipefail
 CLUSTER_NAME="online-boutique-prod"
 AWS_REGION="ap-south-1"
 AWS_ACCOUNT_ID="616919332376"
-KARPENTER_VERSION="0.37.0"
+KARPENTER_VERSION="1.1.0"
 
 # Pull values directly from terraform outputs
 KARPENTER_ROLE_ARN=$(terraform -chdir=terraform/environments/prod output -raw karpenter_controller_role_arn)

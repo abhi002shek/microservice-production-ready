@@ -1,174 +1,138 @@
-# Production Deployment Guide — Online Boutique Microservices
-## DevSecOps on AWS EKS with Karpenter + ArgoCD + Jenkins
+# Deployment Guide — Online Boutique (Production)
+### EKS 1.32 · Karpenter 1.1 · ArgoCD · Jenkins · AWS ap-south-1
 
 ---
 
-## Architecture Overview
+## What This Project Does
 
-```
-Developer Push (per-service branch)
-     │
-     ▼
-   GitHub
-     │
-     ▼
-Jenkins CI Pipeline (one job per service branch)
-  ├── Trivy FS Scan          (blocks on HIGH/CRITICAL in source)
-  ├── SonarQube + Quality Gate (blocks on code quality failures)
-  ├── Docker Build
-  ├── Trivy Image Scan       (blocks on HIGH/CRITICAL in image)
-  ├── Push to ECR            (immutable tag: <build>-<git-sha>)
-  └── Update k8s/overlays/prod/kustomization.yaml → push to main
-           │
-           ▼ (ArgoCD watches main branch)
-     ArgoCD GitOps Sync
-           │
-           ▼
-     EKS Cluster — online-boutique-prod (ap-south-1)
-           │
-     ┌─────┴──────────────────────────────────────────┐
-     │  2x system nodes (t3.medium, fixed)             │
-     │  └─ karpenter, coredns, kube-system pods        │
-     │                                                  │
-     │  Karpenter-managed nodes (auto, t3/m5/m6i/c5)  │
-     │  └─ namespace: webapps                          │
-     │     ├── frontend (3 replicas)                   │
-     │     ├── 10 backend microservices (2 replicas)   │
-     │     ├── redis-cart                              │
-     │     ├── NetworkPolicies (default deny)          │
-     │     ├── HPA + PodDisruptionBudgets              │
-     │     └── SecurityContext hardening on all pods   │
-     └──────────────────────────────────────────────────┘
-           │
-     AWS ALB (internet-facing, HTTP)
-           │
-     http://<ALB-DNS>   ← your app URL (no domain needed yet)
-```
+This deploys a 11-service e-commerce app (Google's Online Boutique) to AWS using:
+- **Terraform** — creates all AWS infrastructure (VPC, EKS cluster, ECR, IAM)
+- **Jenkins** — builds Docker images, scans for vulnerabilities, pushes to ECR
+- **ArgoCD** — automatically deploys to Kubernetes when code changes
+- **Karpenter** — automatically adds/removes servers based on load
 
-**AWS Account:**
-**Region:** ap-south-1  
-**GitHub Repo:** https://github.com/abhi002shek/microservice-production-ready
+You don't need to understand all of this. Just follow the steps in order.
 
 ---
 
-## Prerequisites
+## Before You Start — What You Need
 
-Install on your local machine:
+### Accounts Required
+- AWS account with admin access
+- GitHub account (repo already exists: `https://github.com/abhi002shek/microservice-production-ready`)
+
+### Install These Tools on Your Mac
+
+Open **Terminal** (press `Cmd + Space`, type `Terminal`, press Enter) and run:
 
 ```bash
-# macOS
+# Install Homebrew first (skip if already installed)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install all required tools in one command
 brew install terraform awscli kubectl helm kustomize argocd eksctl
 brew install --cask docker
 ```
 
-Minimum versions:
-```
-terraform >= 1.10.0
-aws CLI  >= 2.x
-kubectl  >= 1.29
-helm     >= 3.x
-eksctl   >= 0.170
+After installing Docker, open the Docker app from your Applications folder and wait for it to say "Docker Desktop is running".
+
+### Verify everything installed correctly
+```bash
+terraform version    # should show >= 1.10.0
+aws --version        # should show >= 2.x
+kubectl version --client
+helm version
+eksctl version
 ```
 
-Configure AWS credentials:
+### Configure AWS Access
+
+1. Go to AWS Console → IAM → Users → your user → Security credentials → Create access key
+2. Run this and paste your keys when asked:
+
 ```bash
 aws configure
-# AWS Access Key ID:     <your-key>
-# AWS Secret Access Key: <your-secret>
+# AWS Access Key ID:     paste your key here
+# AWS Secret Access Key: paste your secret here
 # Default region:        ap-south-1
 # Default output format: json
+```
 
-# Verify
+3. Verify it works:
+```bash
 aws sts get-caller-identity
-# Should show Account: xxxxxx
+# You should see your Account ID printed — if yes, you're connected
 ```
 
 ---
 
-## Step 1 — Bootstrap Terraform Remote State
+## Step 1 — Create S3 Bucket for Terraform State
 
-Run this **once only** before any `terraform` commands. It creates the S3 bucket
-used to store Terraform state remotely.
+> This only needs to be done **once ever**. Skip if already done.
 
 ```bash
-cd terraform/
+cd /path/to/microservice-production-ready/terraform
 chmod +x bootstrap.sh
 ./bootstrap.sh
 ```
 
-What it creates:
-- S3 bucket `boutique-tfstate-prod` — versioned, KMS-encrypted, public access blocked
-
-State locking uses **native S3 locking** (`use_lockfile = true`, Terraform >= 1.10).
-No DynamoDB table needed. Terraform writes a `.tflock` file directly in S3 to prevent
-concurrent `terraform apply` runs — simpler and free.
+This creates a private S3 bucket (`boutique-tfstate-prod`) that stores Terraform's memory of what it has created. Without this, Terraform won't know what already exists.
 
 ---
 
-## Step 2 — Provision AWS Infrastructure with Terraform
+## Step 2 — Create All AWS Infrastructure
+
+This creates your VPC, EKS cluster (Kubernetes), ECR image repositories, and all IAM roles.
 
 ```bash
-cd terraform/environments/prod/
+cd terraform/environments/prod
 
 terraform init
+```
+
+You should see: `Terraform has been successfully initialized!`
+
+```bash
 terraform plan -out=tfplan
+```
+
+This shows you everything Terraform will create. Review it — it should show ~60 resources being created.
+
+```bash
 terraform apply tfplan
 ```
 
-**VPC module** provisions:
-- VPC `10.0.0.0/16` across 3 AZs (ap-south-1a/b/c)
-- 3 private subnets `10.0.1-3.0/24` — all EKS nodes live here (no public IPs)
-- 3 public subnets `10.0.101-103.0/24` — NAT Gateways + ALB
-- 3 NAT Gateways (one per AZ for high availability)
-- Subnet tags so EKS can auto-discover subnets for ALB and internal load balancers
+Type `yes` when asked. This takes **10–15 minutes**. Go get a coffee ☕
 
-**EKS module** provisions:
-- Managed EKS cluster v1.29, private + public endpoint
-- KMS key — encrypts all Kubernetes Secrets at rest
-- CloudWatch control plane logs — api, audit, authenticator, controllerManager, scheduler
-- OIDC provider — enables IRSA (IAM Roles for Service Accounts, no static keys in pods)
-- **2-node system node group** (t3.medium, fixed size, tainted `CriticalAddonsOnly`)
-  - These 2 nodes run: Karpenter controller, CoreDNS, kube-proxy, kube-system pods
-  - Karpenter cannot launch itself, so these nodes are the bootstrap floor
-- **Karpenter IAM role** (IRSA) — controller calls EC2 APIs to launch/terminate nodes
-- **Karpenter node IAM role + instance profile** — EC2 instances launched by Karpenter
-- **SQS queue** — receives EC2 spot interruption events so Karpenter can drain nodes gracefully
-- **EventBridge rules** — forwards spot interruption, rebalance, state-change, health events to SQS
-- EKS add-ons: vpc-cni, coredns, kube-proxy, aws-ebs-csi-driver
-
-**ECR module** provisions:
-- 11 private ECR repositories (one per microservice)
-- Immutable image tags — cannot overwrite an existing tag
-- Scan on push — AWS Inspector scans every image automatically
-- Lifecycle policy — keeps last 10 images, deletes older ones
-
-After apply, save these outputs:
+When done, save these outputs — you'll need them later:
 ```bash
-terraform output cluster_name                      # online-boutique-prod
-terraform output karpenter_controller_role_arn     # used by Karpenter Helm install
-terraform output karpenter_node_instance_profile_name
-terraform output karpenter_interruption_queue_name
-terraform output ecr_repository_urls               # ECR URLs for all 11 services
+terraform output
+# Copy everything printed here to a notepad
 ```
 
 ---
 
-## Step 3 — Configure kubectl
+## Step 3 — Connect kubectl to Your Cluster
 
 ```bash
 aws eks update-kubeconfig \
   --name online-boutique-prod \
   --region ap-south-1
-
-# Verify — should show 2 system nodes in Ready state
-kubectl get nodes
 ```
+
+Test the connection:
+```bash
+kubectl get nodes
+# Should show 2 nodes with status "Ready"
+```
+
+If you see 2 Ready nodes, your cluster is working. ✅
 
 ---
 
 ## Step 4 — Install AWS Load Balancer Controller
 
-The LBC watches Ingress resources and creates/manages AWS ALBs automatically.
+This controller watches your app and creates an AWS Load Balancer automatically.
 
 ```bash
 cd k8s/
@@ -176,24 +140,17 @@ chmod +x install-controllers.sh
 ./install-controllers.sh
 ```
 
-What it does:
-- Creates IAM policy `AWSLoadBalancerControllerIAMPolicy` in your account
-- Creates a Kubernetes ServiceAccount with IRSA annotation (no static AWS keys in cluster)
-- Installs LBC via Helm in `kube-system`
-
-Verify:
+Wait for it to finish (~2 minutes), then verify:
 ```bash
 kubectl get pods -n kube-system | grep aws-load-balancer
-# Should show 2 pods Running
+# Should show 2 pods with status "Running"
 ```
 
 ---
 
-## Step 5 — Install Karpenter
+## Step 5 — Install Karpenter (Auto Node Scaler)
 
-Karpenter is the automatic node provisioner. It replaces Cluster Autoscaler.
-Instead of scaling a fixed ASG, Karpenter watches for `Pending` pods and calls
-EC2 `RunInstances` directly — nodes are ready in ~60 seconds.
+Karpenter automatically adds new servers when your app needs more capacity, and removes them when traffic drops (saves money).
 
 ```bash
 cd k8s/karpenter/
@@ -201,59 +158,43 @@ chmod +x install-karpenter.sh
 ./install-karpenter.sh
 ```
 
-What it does:
-1. Registers the Karpenter node IAM role in `aws-auth` ConfigMap so launched nodes can join the cluster
-2. Installs Karpenter v0.37.0 via Helm — runs on the system nodes (tolerates `CriticalAddonsOnly` taint)
-3. Applies `EC2NodeClass` — AL2023 AMI, 50GB encrypted gp3, IMDSv2 enforced, auto-discovers subnets/SGs by cluster tag
-4. Applies `NodePool` — allows t3/t3a/m5/m6i/c5/c6i families, On-Demand + Spot, min 2 vCPUs, hard cap 80 vCPU / 160Gi
-
-**How Karpenter scales:**
-- Pods go `Pending` → Karpenter picks cheapest fitting instance → node ready in ~60s
-- Node empty for 30s → Karpenter terminates it (cost saving)
-- Spot interruption → SQS receives event → Karpenter cordons + drains node before AWS reclaims it
-
-Monitor:
+This takes ~3 minutes. Verify:
 ```bash
-kubectl get nodeclaims                                              # active nodes
-kubectl get nodepools                                               # pool limits/usage
-kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter -f  # live logs
+kubectl get pods -n karpenter
+# Should show karpenter pod with status "Running"
 ```
 
 ---
 
-## Step 6 — Replace Placeholder Values in Manifests
+## Step 6 — Replace Your AWS Account ID in All Files
+
+Your AWS Account ID is in the terraform output from Step 2. Replace `ACCOUNT_ID` everywhere:
 
 ```bash
-# Replace ACCOUNT_ID with your real account ID in all k8s YAML files
-find k8s/ -name "*.yaml" -exec sed -i '' "s/ACCOUNT_ID/616919332376/g" {} \;
+# Go back to repo root first
+cd /path/to/microservice-production-ready
+
+# Replace ACCOUNT_ID with your real account ID (example: 616919332376)
+find k8s/ -name "*.yaml" -exec sed -i '' "s/ACCOUNT_ID/YOUR_ACCOUNT_ID_HERE/g" {} \;
 ```
 
-**In `k8s/argocd/project.yaml` and `k8s/argocd/application.yaml`:**
-Replace `YOUR_ORG` with `abhi002shek`:
+Example — if your account ID is `123456789012`:
 ```bash
-find k8s/argocd/ -name "*.yaml" -exec sed -i '' "s/YOUR_ORG/abhi002shek/g" {} \;
+find k8s/ -name "*.yaml" -exec sed -i '' "s/ACCOUNT_ID/123456789012/g" {} \;
 ```
 
-**In all `jenkins/Jenkinsfile.*` files:**
+Commit and push this change:
 ```bash
-find jenkins/ -name "Jenkinsfile.*" -exec sed -i '' "s/YOUR_ORG/abhi002shek/g" {} \;
-```
-
-**`k8s/base/ingress.yaml`** — no changes needed. HTTP-only, no domain required.
-When you buy a domain later, follow the comments at the top of that file.
-
-**`k8s/base/serviceaccount.yaml`** — update the IRSA role ARN:
-```bash
-# Get the role ARN
-ROLE_ARN=$(aws iam get-role --role-name online-boutique-prod-sa-role \
-  --query Role.Arn --output text 2>/dev/null || echo "create-this-role-first")
-
-# Or use the karpenter node role for now (update after creating a dedicated SA role)
+git add k8s/
+git commit -m "config: set AWS account ID"
+git push origin main
 ```
 
 ---
 
-## Step 7 — Install ArgoCD
+## Step 7 — Install ArgoCD (Auto Deployment Tool)
+
+ArgoCD watches your GitHub repo and automatically deploys changes to Kubernetes.
 
 ```bash
 cd k8s/argocd/
@@ -261,99 +202,161 @@ chmod +x install-argocd.sh
 ./install-argocd.sh
 ```
 
-What it does:
-- Installs ArgoCD stable in `argocd` namespace
-- Applies `AppProject` (boutique-prod) — whitelists only the resources ArgoCD is allowed to manage
-- Applies `Application` — tells ArgoCD to watch `k8s/overlays/prod/` on the `main` branch
-- Prints the initial admin password
-
-Access ArgoCD UI (ArgoCD stays ClusterIP — not exposed publicly):
-```bash
-# Port-forward to localhost
-kubectl port-forward svc/argocd-server -n argocd 8080:443 &
-
-# Open https://localhost:8080 in browser, or login via CLI
-argocd login localhost:8080 --username admin --password <INITIAL_PASSWORD> --insecure
-
-# Change password immediately
-argocd account update-password
+At the end it will print a password like:
+```
+ArgoCD admin password: xYz1234abcd
+⚠️  Change this immediately after first login!
 ```
 
-Key ArgoCD settings in `application.yaml`:
-- `automated.prune: true` — resources deleted from Git are removed from cluster
-- `automated.selfHeal: true` — manual cluster changes are reverted automatically
-- `retry.limit: 5` — failed syncs retry with exponential backoff (5s → 3m max)
+**Save this password.**
+
+### Access ArgoCD Dashboard
+
+```bash
+# Run this in a separate terminal tab (keep it running)
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+```
+
+Open your browser and go to: **https://localhost:8080**
+
+- Username: `admin`
+- Password: the one printed above
+
+**Change your password immediately** after logging in: top-right → User Info → Update Password
 
 ---
 
 ## Step 8 — Set Up Jenkins
 
-### Required Plugins
-Install from Jenkins → Manage Plugins:
-- Pipeline, Git, Docker Pipeline
-- AWS Steps (`aws-credentials` plugin)
-- SonarQube Scanner
-- Kubernetes CLI
+Jenkins is your CI/CD server that builds and tests code before deploying.
 
-### Required Credentials
-Jenkins → Manage Jenkins → Credentials → Global → Add:
+### Option A — Run Jenkins on an EC2 Instance (Recommended)
 
-| Credential ID       | Type               | Value                                         |
-|---------------------|--------------------|-----------------------------------------------|
-| `aws-account-id`    | Secret text        | `616919332376`                                |
-| `aws-credentials`   | AWS Credentials    | IAM access key + secret (ECR push permission) |
-| `github-token`      | Username+Password  | `abhi002shek` + GitHub Personal Access Token  |
-| `argocd-token`      | Secret text        | ArgoCD API token (generate below)             |
-| `argocd-server-url` | Secret text        | ArgoCD server hostname (no `https://`)        |
-| `sonarqube`         | Secret text        | SonarQube token                               |
+1. Launch an EC2 instance (Ubuntu 22.04, t3.medium) in your AWS account
+2. SSH into it and run:
 
-Generate ArgoCD token:
 ```bash
-argocd account generate-token --account jenkins
-# Paste output as 'argocd-token' credential
+# Install Java
+sudo apt update && sudo apt install -y openjdk-17-jdk
+
+# Install Jenkins
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/ | sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+sudo apt update && sudo apt install -y jenkins
+sudo systemctl start jenkins
+
+# Install Docker
+sudo apt install -y docker.io
+sudo usermod -aG docker jenkins
+sudo systemctl restart jenkins
+
+# Install Trivy (security scanner)
+sudo apt install -y wget apt-transport-https gnupg
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+sudo apt update && sudo apt install -y trivy
+
+# Install kubectl and kustomize
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+sudo mv kustomize /usr/local/bin/
+
+# Install ArgoCD CLI
+curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
 ```
 
-### Create Pipeline Jobs (one per service)
+3. Open Jenkins at `http://YOUR_EC2_IP:8080`
+4. Get the initial password: `sudo cat /var/lib/jenkins/secrets/initialAdminPassword`
+5. Install suggested plugins when prompted
 
-For each service, create a Jenkins Pipeline job:
-1. New Item → Pipeline → name: `online-boutique-<service>`
-2. Pipeline → Definition: **Pipeline script from SCM**
-3. SCM: Git, URL: `https://github.com/abhi002shek/microservice-production-ready.git`
-4. Branch: `origin/<service>` (e.g. `origin/adservice`)
-5. Script Path: `Jenkinsfile`
+### Required Jenkins Plugins
 
-Then push the corresponding `jenkins/Jenkinsfile.<service>` content as `Jenkinsfile`
-into each service branch (see Step 10 — Per-Branch Jenkinsfile Push).
+Go to **Manage Jenkins → Plugins → Available** and install:
+- `Pipeline`
+- `Git`
+- `Docker Pipeline`
+- `AWS Credentials`
+- `SonarQube Scanner`
+- `CloudBees AWS Credentials`
 
-### Jenkins IAM Policy
-The IAM user used by Jenkins needs this policy:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "ecr:GetAuthorizationToken",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:BatchGetImage",
-      "ecr:InitiateLayerUpload",
-      "ecr:UploadLayerPart",
-      "ecr:CompleteLayerUpload",
-      "ecr:PutImage"
-    ],
-    "Resource": "*"
-  }]
-}
+### Required Jenkins Credentials
+
+Go to **Manage Jenkins → Credentials → Global → Add Credential**:
+
+| What to add | Type | ID to use | Value |
+|---|---|---|---|
+| AWS Account ID | Secret text | `aws-account-id` | Your 12-digit AWS account number |
+| AWS Keys | AWS Credentials | `aws-credentials` | Your IAM access key + secret |
+| GitHub Token | Username + Password | `github-token` | Username: `abhi002shek`, Password: your GitHub PAT |
+| ArgoCD Token | Secret text | `argocd-token` | Generate below |
+| ArgoCD Server | Secret text | `argocd-server-url` | `localhost:8080` (or your ArgoCD server address) |
+| SonarQube Token | Secret text | `sonarqube` | From SonarQube → My Account → Security |
+
+**Generate ArgoCD token:**
+```bash
+# Run this on your local machine
+kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+argocd login localhost:8080 --username admin --password YOUR_ARGOCD_PASSWORD --insecure
+argocd account generate-token --account admin
+# Copy the printed token → paste as 'argocd-token' credential in Jenkins
+```
+
+### Create Jenkins Pipeline Jobs (one per service)
+
+For each of the 11 services, create a pipeline job:
+
+1. Click **New Item**
+2. Name it `online-boutique-adservice` (replace `adservice` with each service name)
+3. Select **Pipeline** → OK
+4. Under Pipeline section:
+   - Definition: `Pipeline script from SCM`
+   - SCM: `Git`
+   - Repository URL: `https://github.com/abhi002shek/microservice-production-ready.git`
+   - Branch: `*/adservice` (change per service)
+   - Script Path: `Jenkinsfile`
+5. Save
+
+The 11 services are: `adservice`, `cartservice`, `checkoutservice`, `currencyservice`, `emailservice`, `frontend`, `loadgenerator`, `paymentservice`, `productcatalogservice`, `recommendationservice`, `shippingservice`
+
+---
+
+## Step 9 — Push Jenkinsfiles to Each Service Branch
+
+Each service branch needs its own `Jenkinsfile`. Run this from the repo root:
+
+```bash
+for svc in adservice cartservice checkoutservice currencyservice emailservice \
+           frontend loadgenerator paymentservice productcatalogservice \
+           recommendationservice shippingservice; do
+  git checkout origin/$svc -b $svc 2>/dev/null || git checkout $svc
+  cp jenkins/Jenkinsfile.$svc Jenkinsfile
+  git add Jenkinsfile
+  git commit -m "ci: add Jenkinsfile [skip ci]"
+  git push origin $svc
+  git checkout main
+done
 ```
 
 ---
 
-## Step 9 — Install Monitoring Stack
+## Step 10 — Install Monitoring (Prometheus + Grafana)
+
+First create the Grafana password secret (replace `YourStrongPassword123` with something secure):
 
 ```bash
 kubectl create namespace monitoring
 
+kubectl create secret generic grafana-admin-secret \
+  --from-literal=admin-user=admin \
+  --from-literal=admin-password='YourStrongPassword123' \
+  -n monitoring
+```
+
+Then install the monitoring stack:
+
+```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 
@@ -362,279 +365,205 @@ helm install monitoring prometheus-community/kube-prometheus-stack \
   -f k8s/monitoring/monitoring-values.yaml
 ```
 
-Installs:
-- Prometheus — 15-day retention, 50GB gp3 persistent volume
-- Grafana — dashboards, internal ALB access
-- Alertmanager — alert routing
-- Node Exporter + kube-state-metrics
-- Pre-built alert rules for pods, nodes, cluster health
-
-Access Grafana:
+Access Grafana dashboard:
 ```bash
-kubectl get svc -n monitoring | grep grafana
-# Login: admin / CHANGE_ME_USE_SECRET  (update in monitoring-values.yaml before install)
+kubectl port-forward svc/monitoring-grafana -n monitoring 3000:80
+# Open http://localhost:3000
+# Login: admin / YourStrongPassword123
 ```
 
 ---
 
-## Step 10 — Per-Branch Jenkinsfile Push
-
-Each service branch needs its own `Jenkinsfile`. The files are in `jenkins/` on `main`.
-Push each one to its corresponding branch:
+## Step 11 — Verify Everything is Working
 
 ```bash
-# Example for adservice — repeat for all 11 services
-git checkout adservice
-cp jenkins/Jenkinsfile.adservice Jenkinsfile
-git add Jenkinsfile
-git commit -m "ci: add production Jenkinsfile"
-git push origin adservice
-git checkout main
-```
-
-Or run this loop:
-```bash
-for svc in adservice cartservice checkoutservice currencyservice emailservice \
-           frontend loadgenerator paymentservice productcatalogservice \
-           recommendationservice shippingservice; do
-  git checkout origin/$svc -b $svc 2>/dev/null || git checkout $svc
-  cp jenkins/Jenkinsfile.$svc Jenkinsfile
-  git add Jenkinsfile
-  git commit -m "ci: add production Jenkinsfile [skip ci]"
-  git push origin $svc
-  git checkout main
-done
-```
-
----
-
-## Step 11 — Verify Full Deployment
-
-```bash
-# All pods running
+# Check all pods are running (takes 3-5 minutes after first deploy)
 kubectl get pods -n webapps
 
-# Get your app URL — copy the ADDRESS column
+# Get your app's public URL
 kubectl get ingress -n webapps
-# Open: http://<ALB-DNS-ADDRESS> in browser
-
-# Karpenter nodes
-kubectl get nodes
-kubectl get nodeclaims
-
-# HPA
-kubectl get hpa -n webapps
-
-# ArgoCD sync status
-argocd app get online-boutique
+# Copy the ADDRESS column — open it in your browser
+# Example: http://k8s-webapps-abc123.ap-south-1.elb.amazonaws.com
 ```
 
-Expected pods in `webapps`:
+Expected output — all pods should show `Running`:
 ```
-adservice-xxx               2/2  Running
-cartservice-xxx             2/2  Running
-checkoutservice-xxx         2/2  Running  (3/3 in prod overlay)
-currencyservice-xxx         2/2  Running
-emailservice-xxx            2/2  Running
-frontend-xxx                3/3  Running
-loadgenerator-xxx           1/1  Running
-paymentservice-xxx          2/2  Running
-productcatalogservice-xxx   2/2  Running
-recommendationservice-xxx   2/2  Running
-redis-cart-xxx              1/1  Running
-shippingservice-xxx         2/2  Running
+NAME                                    READY   STATUS
+adservice-xxx                           1/1     Running
+cartservice-xxx                         1/1     Running
+checkoutservice-xxx                     1/1     Running
+currencyservice-xxx                     1/1     Running
+emailservice-xxx                        1/1     Running
+frontend-xxx                            1/1     Running
+loadgenerator-xxx                       1/1     Running
+paymentservice-xxx                      1/1     Running
+productcatalogservice-xxx               1/1     Running
+recommendationservice-xxx               1/1     Running
+redis-cart-xxx                          1/1     Running
+shippingservice-xxx                     1/1     Running
 ```
 
 ---
 
-## CI/CD Flow — What Happens on Every Code Push
+## How Deployments Work After Setup
+
+Once everything above is done, deploying a new version of any service is automatic:
 
 ```
-git push → adservice branch
-    │
-    ├─ [1] Trivy FS scan source code
-    │       FAIL → pipeline stops, no image built
-    │
-    ├─ [2] SonarQube analysis + Quality Gate
-    │       FAIL → pipeline stops
-    │
-    ├─ [3] docker build → image:1234-abc1234
-    │
-    ├─ [4] Trivy image scan
-    │       FAIL → pipeline stops, image NOT pushed
-    │
-    ├─ [5] docker push → ECR (immutable tag)
-    │
-    ├─ [6] kustomize edit set image → commit to main branch
-    │       k8s/overlays/prod/kustomization.yaml updated
-    │
-    └─ [7] ArgoCD detects diff → rolling update on EKS
-            zero downtime (2 replicas, PDB ensures 1 always up)
+You push code to the adservice branch
+        ↓
+Jenkins automatically:
+  1. Scans code for security issues (Trivy)
+  2. Checks code quality (SonarQube)
+  3. Builds Docker image
+  4. Scans image for vulnerabilities
+  5. Pushes image to ECR
+  6. Updates the deployment config in GitHub
+        ↓
+ArgoCD automatically:
+  7. Detects the config change in GitHub
+  8. Rolls out the new version to Kubernetes
+  9. Zero downtime — old pods stay up until new ones are healthy
 ```
+
+You don't need to do anything manually after the initial setup.
 
 ---
 
-## Adding HTTPS When You Buy a Domain
-
-When you purchase a domain, follow these steps:
+## Adding HTTPS (When You Buy a Domain)
 
 ```bash
-# 1. Request ACM certificate (must be in ap-south-1)
+# 1. Request a free SSL certificate from AWS
 aws acm request-certificate \
   --domain-name yourdomain.com \
   --validation-method DNS \
   --region ap-south-1
 
-# 2. Complete DNS validation in Route53 (ACM shows the CNAME to add)
+# 2. AWS will show you a CNAME record to add to your domain's DNS
+#    Add it in your domain registrar's DNS settings
 
-# 3. Get the certificate ARN
+# 3. Get the certificate ARN (after DNS validation completes ~5 min)
 aws acm list-certificates --region ap-south-1
 
-# 4. Update k8s/base/ingress.yaml — replace the annotations block with:
+# 4. Edit k8s/base/ingress.yaml — add these 3 lines under annotations:
 #    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
 #    alb.ingress.kubernetes.io/ssl-redirect: "443"
-#    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:616919332376:certificate/<CERT-ID>
-#    And add under spec.rules:
-#    - host: yourdomain.com
+#    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:YOUR_ACCOUNT:certificate/CERT-ID
 
-# 5. Create Route53 A record (alias) pointing to the ALB DNS
-# 6. Commit and push — ArgoCD applies the change automatically
+# 5. Commit and push — ArgoCD deploys it automatically
+git add k8s/base/ingress.yaml
+git commit -m "feat: enable HTTPS"
+git push origin main
 ```
 
 ---
 
-## Security Controls
+## Rollback a Bad Deployment
 
-| Control                  | Implementation                                           |
-|--------------------------|----------------------------------------------------------|
-| Image CVE scanning       | Trivy blocks pipeline on HIGH/CRITICAL                   |
-| Source code scanning     | Trivy FS + SonarQube on every commit                     |
-| ECR scanning             | AWS Inspector scans on every push                        |
-| Immutable image tags     | ECR IMMUTABLE — no tag overwriting                       |
-| No root containers       | `runAsNonRoot: true`, `runAsUser: 1000` on all pods      |
-| No privilege escalation  | `allowPrivilegeEscalation: false` on all containers      |
-| Dropped capabilities     | `capabilities.drop: [ALL]` on all containers             |
-| Read-only root FS        | `readOnlyRootFilesystem: true` on all containers         |
-| Seccomp                  | `RuntimeDefault` profile on all pods                     |
-| Network segmentation     | Default deny-all + explicit per-service NetworkPolicies  |
-| Secrets encryption       | KMS encrypts all Kubernetes Secrets at rest              |
-| IMDSv2 enforced          | All nodes (system + Karpenter-launched) require IMDSv2   |
-| Encrypted node disks     | 50GB gp3 EBS encrypted with KMS on all nodes            |
-| Private nodes            | All nodes in private subnets, no public IPs              |
-| No static AWS keys       | IRSA for all AWS access (LBC, Karpenter, service pods)   |
-| GitOps enforcement       | ArgoCD selfHeal reverts any manual cluster changes       |
-| Control plane audit logs | All 5 log types → CloudWatch                             |
-
----
-
-## Rollback
+If something breaks after a deployment:
 
 ```bash
-# Option 1 — ArgoCD UI or CLI (recommended)
-argocd app history online-boutique
-argocd app rollback online-boutique <REVISION>
+# Option 1 — Roll back via ArgoCD (easiest)
+argocd app history online-boutique   # see all deployments
+argocd app rollback online-boutique 3  # roll back to revision 3
 
-# Option 2 — Git revert (ArgoCD auto-syncs)
-git revert <commit-that-updated-kustomization>
-git push origin main
-
-# Option 3 — Emergency direct rollback
+# Option 2 — Emergency rollback of one service
 kubectl rollout undo deployment/frontend -n webapps
+
+# Option 3 — Revert the git commit (ArgoCD auto-deploys the revert)
+git revert HEAD
+git push origin main
 ```
 
 ---
 
 ## Troubleshooting
 
+**Pods stuck in `Pending` state:**
 ```bash
-# Pod not starting
-kubectl describe pod <pod> -n webapps
-kubectl logs <pod> -n webapps --previous
+kubectl describe pod POD_NAME -n webapps
+# Look for "Events" section at the bottom — it tells you why
+```
 
-# Karpenter not launching nodes
-kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | tail -50
+**Karpenter not launching new nodes:**
+```bash
+kubectl logs -n karpenter -l app.kubernetes.io/name=karpenter | tail -30
+```
 
-# ALB not created
-kubectl logs -n kube-system deployment/aws-load-balancer-controller
+**App URL not working / ALB not created:**
+```bash
+kubectl logs -n kube-system deployment/aws-load-balancer-controller | tail -20
+```
 
-# ArgoCD stuck
-argocd app sync online-boutique --force
+**ArgoCD shows app as OutOfSync:**
+```bash
+argocd app sync online-boutique
+```
 
-# Network policy blocking traffic (test by temporarily removing)
-kubectl delete networkpolicy default-deny-all -n webapps
+**Jenkins pipeline failing on git push:**
+```bash
+# This is usually a concurrent push conflict — re-run the pipeline
+# The Jenkinsfiles already have git pull --rebase to handle this
 ```
 
 ---
 
-## File Structure
+## Monthly Cost Estimate (ap-south-1)
+
+| Resource | ~Cost/Month |
+|---|---|
+| EKS control plane | $73 |
+| 2x t3.medium system nodes (always on) | $60 |
+| Karpenter workload nodes (scales with traffic) | $50–150 |
+| 3x NAT Gateways | $100 |
+| Application Load Balancer | $20 |
+| ECR (11 repos) | $5 |
+| CloudWatch logs | $10 |
+| **Total estimate** | **~$320–420/month** |
+
+**To reduce cost during testing:**
+- Change NAT Gateways from 3 to 1 in `terraform/modules/vpc/main.tf` (single AZ, not HA)
+- Karpenter already prefers Spot instances which are 60–70% cheaper than On-Demand
+
+---
+
+## Infrastructure Versions
+
+| Component | Version |
+|---|---|
+| EKS (Kubernetes) | 1.32 |
+| Karpenter | 1.1.0 |
+| vpc-cni addon | v1.18.3-eksbuild.1 |
+| coredns addon | v1.11.3-eksbuild.1 |
+| kube-proxy addon | v1.32.0-eksbuild.1 |
+| aws-ebs-csi-driver addon | v1.37.0-eksbuild.1 |
+| Terraform | >= 1.10.0 |
+
+---
+
+## File Structure Reference
 
 ```
-microservice-production-ready/          ← main branch
-├── DEPLOYMENT_GUIDE.md                 ← this file
+microservice-production-ready/
+├── DEPLOYMENT_GUIDE.md          ← you are here
 ├── terraform/
-│   ├── bootstrap.sh                    # run once: creates S3 + DynamoDB for state
+│   ├── bootstrap.sh             ← run once: creates S3 bucket for state
 │   ├── environments/prod/
-│   │   ├── main.tf                     # calls vpc + eks + ecr modules
-│   │   ├── variables.tf                # region, CIDRs, cluster version, service list
-│   │   └── outputs.tf                  # cluster name, ECR URLs, Karpenter role ARNs
+│   │   ├── main.tf              ← calls vpc + eks + ecr modules
+│   │   ├── variables.tf         ← region, cluster version, service list
+│   │   └── outputs.tf           ← prints cluster name, ECR URLs etc
 │   └── modules/
-│       ├── vpc/main.tf                 # VPC, 3 AZs, private/public subnets, NAT GWs
-│       ├── eks/main.tf                 # EKS cluster, KMS, OIDC, system nodes,
-│       │                               # Karpenter IAM + SQS + EventBridge
-│       └── ecr/main.tf                 # 11 ECR repos, immutable tags, lifecycle
+│       ├── vpc/main.tf          ← VPC, subnets, NAT gateways
+│       ├── eks/main.tf          ← EKS cluster, IAM, Karpenter infra
+│       └── ecr/main.tf          ← 11 ECR image repositories
 ├── k8s/
-│   ├── base/
-│   │   ├── namespace.yaml              # webapps namespace
-│   │   ├── serviceaccount.yaml         # shared SA with IRSA annotation
-│   │   ├── deployments.yaml            # all 12 services, hardened security contexts
-│   │   ├── ingress.yaml                # ALB Ingress, HTTP (HTTPS instructions inside)
-│   │   ├── hpa.yaml                    # HPA for frontend, checkout, cart, productcatalog
-│   │   ├── pdb.yaml                    # PodDisruptionBudgets for 5 critical services
-│   │   └── kustomization.yaml
-│   ├── overlays/prod/
-│   │   └── kustomization.yaml          # image tags updated here by Jenkins on each build
-│   ├── security/
-│   │   └── network-policies.yaml       # default deny-all + 11 per-service allow rules
-│   ├── argocd/
-│   │   ├── project.yaml                # AppProject — restricts what ArgoCD can deploy
-│   │   ├── application.yaml            # Application — watches k8s/overlays/prod on main
-│   │   └── install-argocd.sh           # installs ArgoCD + applies project + application
-│   ├── karpenter/
-│   │   ├── nodepool.yaml               # EC2NodeClass + NodePool (auto node provisioning)
-│   │   └── install-karpenter.sh        # installs Karpenter via Helm + applies nodepool
-│   ├── monitoring/
-│   │   └── monitoring-values.yaml      # kube-prometheus-stack Helm values
-│   └── install-controllers.sh          # installs AWS Load Balancer Controller
+│   ├── base/                    ← Kubernetes manifests for all services
+│   ├── overlays/prod/           ← production image tags (updated by Jenkins)
+│   ├── security/                ← network policies (who can talk to who)
+│   ├── argocd/                  ← ArgoCD install + config
+│   ├── karpenter/               ← Karpenter install + node config
+│   ├── monitoring/              ← Prometheus + Grafana config
+│   └── install-controllers.sh  ← installs AWS Load Balancer Controller
 └── jenkins/
-    ├── Jenkinsfile.shared              # annotated reference (not used directly)
-    ├── Jenkinsfile.adservice           # push to adservice branch as Jenkinsfile
-    ├── Jenkinsfile.cartservice
-    ├── Jenkinsfile.checkoutservice
-    ├── Jenkinsfile.currencyservice
-    ├── Jenkinsfile.emailservice
-    ├── Jenkinsfile.frontend
-    ├── Jenkinsfile.loadgenerator
-    ├── Jenkinsfile.paymentservice
-    ├── Jenkinsfile.productcatalogservice
-    ├── Jenkinsfile.recommendationservice
-    └── Jenkinsfile.shippingservice
+    └── Jenkinsfile.*            ← one pipeline file per service
 ```
-
----
-
-## Cost Estimate (ap-south-1, monthly)
-
-| Resource                         | ~Cost/Month |
-|----------------------------------|-------------|
-| EKS control plane                | $73         |
-| 2x t3.medium system nodes        | $60         |
-| Karpenter nodes (variable)       | $50–150     |
-| 3x NAT Gateways                  | $100        |
-| ALB                              | $20         |
-| ECR (11 repos)                   | $5          |
-| CloudWatch logs                  | $10         |
-| SQS (Karpenter interruption)     | <$1         |
-| **Total estimate**               | **~$320–420/month** |
-
-To reduce cost: use 1 NAT Gateway (single AZ), reduce system nodes to t3.small,
-set Karpenter to prefer Spot instances (already configured in NodePool).

@@ -141,6 +141,7 @@ resource "aws_iam_policy" "karpenter_controller" {
           "ec2:DescribeAvailabilityZones",
           "ec2:DescribeSpotPriceHistory",
           "ec2:DescribeImages",
+          "ec2:DescribeInstanceTopology",
           "pricing:GetProducts",
           "ec2:DescribeVolumes",
           "ec2:DescribeVolumesModifications"
@@ -357,10 +358,10 @@ resource "aws_launch_template" "system_node" {
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────
 resource "aws_eks_addon" "addons" {
   for_each = {
-    "vpc-cni"            = "v1.16.0-eksbuild.1"
-    "coredns"            = "v1.11.1-eksbuild.4"
-    "kube-proxy"         = "v1.29.0-eksbuild.1"
-    "aws-ebs-csi-driver" = "v1.28.0-eksbuild.1"
+    "vpc-cni"            = "v1.18.3-eksbuild.1"
+    "coredns"            = "v1.11.3-eksbuild.1"
+    "kube-proxy"         = "v1.32.0-eksbuild.1"
+    "aws-ebs-csi-driver" = "v1.37.0-eksbuild.1"
   }
 
   cluster_name                = aws_eks_cluster.this.name
